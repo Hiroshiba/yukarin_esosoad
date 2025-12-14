@@ -3,7 +3,7 @@
 
 設定ファイルからDatasetCollectionを読み込み、データタイプごとにGradio UIで表示する。
 各データタイプの表示形式（プロット、テーブル等）は機械学習タスクに応じてカスタマイズする。
-データタイプに応じた可視化ロジックを_update_*_plotや_get_data_infoで調整する。
+データタイプに応じた可視化ロジックを_setup_*_plotや_create_data_infoで調整する。
 """
 
 import argparse
