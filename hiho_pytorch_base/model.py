@@ -10,6 +10,7 @@ from torch.nn.functional import cross_entropy, mse_loss
 from .batch import BatchOutput
 from .config import ModelConfig
 from .network.predictor import Predictor
+from .network.transformer.utility import make_non_pad_mask
 from .utility.pytorch_utility import detach_cpu
 from .utility.train_utility import DataNumProtocol
 
@@ -47,6 +48,18 @@ def accuracy(
         return correct.float().mean()
 
 
+def masked_mse_loss(
+    output: Tensor,  # (B, L, ?)
+    target: Tensor,  # (B, L, ?)
+    mask: Tensor,  # (B, L)
+) -> Tensor:
+    """マスク対応のMSE損失を計算"""
+    diff_squared = (output - target) ** 2  # (B, L, ?)
+    mask_expanded = mask.unsqueeze(-1)  # (B, L, 1)
+    masked_loss = diff_squared * mask_expanded  # (B, L, ?)
+    return masked_loss.sum() / (mask.sum() * output.size(-1))
+
+
 class Model(nn.Module):
     """学習モデルクラス"""
 
@@ -59,21 +72,23 @@ class Model(nn.Module):
         """データをネットワークに入力して損失などを計算する"""
         (
             vector_output,  # (B, ?)
-            variable_output_list,  # [(L, ?)]
+            variable_output,  # (B, L, ?)
             scalar_output,  # (B,)
         ) = self.predictor(
             feature_vector=batch.feature_vector,
-            feature_variable_list=batch.feature_variable_list,
+            feature_variable=batch.feature_variable,
             speaker_id=batch.speaker_id,
+            length=batch.length,
         )
 
         target_vector = batch.target_vector  # (B,)
-        variable_output = torch.cat(variable_output_list)
-        target_variable = torch.cat(batch.target_variable_list)
+        target_variable = batch.target_variable  # (B, L, ?)
         target_scalar = batch.target_scalar  # (B,)
 
+        mask = make_non_pad_mask(batch.length)  # (B, L)
+
         loss_vector = cross_entropy(vector_output, target_vector)
-        loss_variable = mse_loss(variable_output, target_variable)
+        loss_variable = masked_mse_loss(variable_output, target_variable, mask)
         loss_scalar = mse_loss(scalar_output, target_scalar)
         total_loss = loss_vector + loss_variable + loss_scalar
         acc = accuracy(vector_output, target_vector)

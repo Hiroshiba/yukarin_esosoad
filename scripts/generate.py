@@ -86,8 +86,9 @@ def generate(
         batch.to_device(device="cuda" if use_gpu else "cpu", non_blocking=True)
         _ = generator(
             feature_vector=batch.feature_vector,
-            feature_variable_list=batch.feature_variable_list,
+            feature_variable=batch.feature_variable,
             speaker_id=batch.speaker_id,
+            length=batch.length,
         )
 
 

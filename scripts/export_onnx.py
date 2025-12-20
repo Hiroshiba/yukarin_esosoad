@@ -21,14 +21,16 @@ class PredictorWrapper(nn.Module):
 
     def forward(  # noqa: D102
         self,
-        feature_vector: Tensor,
-        feature_variable: Tensor,
-        speaker_id: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+        feature_vector: Tensor,  # (B, ?)
+        feature_variable: Tensor,  # (B, L, ?)
+        speaker_id: Tensor,  # (B,)
+        length: Tensor,  # (B,)
+    ) -> tuple[Tensor, Tensor, Tensor]:  # (B, ?), (B, L, ?), (B,)
         return self.predictor(
             feature_vector=feature_vector,
-            feature_variable_list=[feature_variable],
+            feature_variable=feature_variable,
             speaker_id=speaker_id,
+            length=length,
         )
 
 
@@ -46,10 +48,13 @@ def export_onnx(config_yaml_path: UPath, output_path: Path, verbose: bool) -> No
     max_length = 50
 
     feature_vector = torch.randn(batch_size, config.network.feature_vector_size)
-    feature_variable = torch.randn(max_length, config.network.feature_variable_size)
+    feature_variable = torch.randn(
+        batch_size, max_length, config.network.feature_variable_size
+    )
     speaker_id = torch.randint(0, config.network.speaker_size, (batch_size,))
+    length = torch.tensor([max_length])
 
-    example_inputs = (feature_vector, feature_variable, speaker_id)
+    example_inputs = (feature_vector, feature_variable, speaker_id, length)
 
     torch.onnx.export(
         wrapper,
@@ -59,13 +64,16 @@ def export_onnx(config_yaml_path: UPath, output_path: Path, verbose: bool) -> No
             "feature_vector",
             "feature_variable",
             "speaker_id",
+            "length",
         ],
-        output_names=["vector_output", "variable_output_list", "scalar_output"],
+        output_names=["vector_output", "variable_output", "scalar_output"],
         dynamic_axes={
             "feature_vector": {0: "batch_size"},
-            "feature_variable": {0: "max_length"},
+            "feature_variable": {0: "batch_size", 1: "max_length"},
             "speaker_id": {0: "batch_size"},
+            "length": {0: "batch_size"},
             "vector_output": {0: "batch_size"},
+            "variable_output": {0: "batch_size", 1: "max_length"},
             "scalar_output": {0: "batch_size"},
         },
         verbose=verbose,

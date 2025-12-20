@@ -2,7 +2,6 @@
 
 import torch
 from torch import Tensor, nn
-from torch.nn.utils.rnn import pad_sequence
 
 from ..config import NetworkConfig
 from .conformer.encoder import Encoder
@@ -39,47 +38,36 @@ class Predictor(nn.Module):
         self,
         *,
         feature_vector: Tensor,  # (B, ?)
-        feature_variable_list: list[Tensor],  # [(vL, ?)]
+        feature_variable: Tensor,  # (B, L, ?)
         speaker_id: Tensor,  # (B,)
-    ) -> tuple[Tensor, list[Tensor], Tensor]:  # (B, ?), [(vL, ?)], (B,)
+        length: Tensor,  # (B,)
+    ) -> tuple[Tensor, Tensor, Tensor]:  # (B, ?), (B, L, ?), (B,)
         device = feature_vector.device
         batch_size = feature_vector.size(0)
 
-        lengths = torch.tensor(
-            [var_data.shape[0] for var_data in feature_variable_list], device=device
-        )
-
-        if batch_size == 1:
-            # NOTE: ONNX化の際にpad_sequenceがエラーになるため迂回
-            padded_variable = feature_variable_list[0].unsqueeze(0)  # (1, L, ?)
-        else:
-            padded_variable = pad_sequence(
-                feature_variable_list, batch_first=True
-            )  # (B, L, ?)
-
         speaker_embedding = self.speaker_embedder(speaker_id)  # (B, ?)
 
-        max_length = padded_variable.size(1)
+        max_length = feature_variable.size(1)
         speaker_expanded = speaker_embedding.unsqueeze(1).expand(
             batch_size, max_length, -1
         )  # (B, L, ?)
 
         combined_variable = torch.cat(
-            [padded_variable, speaker_expanded], dim=2
+            [feature_variable, speaker_expanded], dim=2
         )  # (B, L, ?)
 
         h = self.pre_conformer(combined_variable)  # (B, L, ?)
 
-        mask = make_non_pad_mask(lengths).unsqueeze(-2).to(device)  # (B, 1, L)
+        mask = make_non_pad_mask(length).unsqueeze(-2).to(device)  # (B, 1, L)
 
         encoded, _ = self.encoder(x=h, cond=None, mask=mask)  # (B, L, ?)
 
-        variable_features = self.variable_head(encoded)  # (B, L, ?)
+        variable_output = self.variable_head(encoded)  # (B, L, ?)
 
         mask_expanded = mask.squeeze(-2).unsqueeze(-1)  # (B, L, 1)
         masked_encoded = encoded * mask_expanded  # (B, L, ?)
         variable_sum = masked_encoded.sum(dim=1)  # (B, ?)
-        variable_mean = variable_sum / lengths.unsqueeze(-1).float()  # (B, ?)
+        variable_mean = variable_sum / length.unsqueeze(-1).float()  # (B, ?)
 
         fixed_features = self.feature_vector_processor(feature_vector)  # (B, ?)
 
@@ -88,11 +76,7 @@ class Predictor(nn.Module):
         vector_output = self.vector_head(final_features)  # (B, ?)
         scalar_output = self.scalar_head(final_features).squeeze(-1)  # (B,)
 
-        variable_output_list = [
-            variable_features[i, :length] for i, length in enumerate(lengths)
-        ]
-
-        return vector_output, variable_output_list, scalar_output
+        return vector_output, variable_output, scalar_output
 
 
 def create_predictor(config: NetworkConfig) -> Predictor:
