@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## プロジェクト概要
 
-このリポジトリは、フォークして使用することを前提とした**汎用機械学習フレームワーク**のベースです。PyTorchベースでマルチタスク学習、多話者学習に対応したneural networkの学習・推論システムを提供します。
+このリポジトリは、LibriTTSなどのデータセットを使用して音素ラベルやPanPhon特徴量から音響特徴量（スペクトログラム）を予測するための機械学習フレームワークです。PyTorchベースで実装されており、多話者対応のスペクトログラム生成を行います。
 
 ## 主なコンポーネント
 
@@ -37,9 +37,11 @@ ProjectConfig:      # プロジェクト情報設定
 - 多話者学習対応（JSON形式の話者マッピング）
 
 ### ネットワーク (`hiho_pytorch_base/network/predictor.py`)
-- マルチタスク予測器
+- Diffusionベースのスペクトログラム生成
 - 固定長・可変長データの統一処理
-- マルチヘッド出力対応
+- Rectified FlowまたはMeanFlowモデルに対応
+- 音素エンベディング後の多層Linear層による特徴変換
+- スペクトログラム予測用出力ヘッド
 
 ### 推論・生成
 - `hiho_pytorch_base/generator.py`: 推論ジェネレーター
