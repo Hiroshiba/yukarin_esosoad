@@ -15,11 +15,11 @@ class _Model(BaseModel):
 class DataFileConfig(_Model):
     """データファイルの設定"""
 
-    feature_vector_pathlist_path: UPathField
-    feature_variable_pathlist_path: UPathField
-    target_vector_pathlist_path: UPathField
-    target_variable_pathlist_path: UPathField
-    target_scalar_pathlist_path: UPathField
+    f0_pathlist_path: UPathField
+    volume_pathlist_path: UPathField
+    lab_pathlist_path: UPathField
+    silence_pathlist_path: UPathField
+    spec_pathlist_path: UPathField
     speaker_dict_path: UPathField
     root_dir: UPathField | None
 
@@ -29,13 +29,13 @@ class DatasetConfig(_Model):
 
     train: DataFileConfig
     valid: DataFileConfig | None = None
+    prepost_silence_length: int
+    max_sampling_length: int
     train_num: int | None = None
     test_num: int
     eval_for_test: bool
     eval_times_num: int = 1
     seed: int = 0
-    frame_rate: float
-    frame_length: int
 
 
 class NetworkConfig(_Model):

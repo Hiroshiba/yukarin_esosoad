@@ -7,13 +7,17 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import assert_never
 
-import numpy
 from pydantic import TypeAdapter
 from torch.utils.data import Dataset as BaseDataset
 from upath import UPath
 
 from .config import DataFileConfig, DatasetConfig
-from .data.data import InputData, OutputData, preprocess
+from .data.data import (
+    InputData,
+    OutputData,
+    preprocess,
+)
+from .data.phoneme import ArpaPhoneme
 from .data.sampling_data import SamplingData
 from .utility.upath_utility import to_local_path
 
@@ -22,27 +26,21 @@ from .utility.upath_utility import to_local_path
 class LazyInputData:
     """遅延読み込み対応の入力データ構造"""
 
-    feature_vector_path: UPath
-    feature_variable_path: UPath
-    target_vector_path: UPath
-    target_variable_path: UPath
-    target_scalar_path: UPath
+    f0_path: UPath
+    volume_path: UPath
+    lab_path: UPath
+    silence_path: UPath
+    spec_path: UPath  # NOTE: 対数メルスペクトログラム
     speaker_id: int
 
     def fetch(self) -> InputData:
         """ファイルからデータを読み込んでInputDataを生成"""
         return InputData(
-            feature_vector=numpy.load(
-                to_local_path(self.feature_vector_path), allow_pickle=True
-            ),
-            feature_variable=numpy.load(
-                to_local_path(self.feature_variable_path), allow_pickle=True
-            ),
-            target_vector=SamplingData.load(to_local_path(self.target_vector_path)),
-            target_variable=SamplingData.load(to_local_path(self.target_variable_path)),
-            target_scalar=float(
-                numpy.load(to_local_path(self.target_scalar_path), allow_pickle=True)
-            ),
+            phonemes=ArpaPhoneme.load_julius_list(to_local_path(self.lab_path)),
+            f0_data=SamplingData.load(to_local_path(self.f0_path)),
+            volume_data=SamplingData.load(to_local_path(self.volume_path)),
+            silence_data=SamplingData.load(to_local_path(self.silence_path)),
+            spec_data=SamplingData.load(to_local_path(self.spec_path)),
             speaker_id=self.speaker_id,
         )
 
@@ -98,8 +96,8 @@ class Dataset(BaseDataset[OutputData]):
         try:
             return preprocess(
                 self.datas[i].fetch(),
-                frame_rate=self.config.frame_rate,
-                frame_length=self.config.frame_length,
+                prepost_silence_length=self.config.prepost_silence_length,
+                max_sampling_length=self.config.max_sampling_length,
                 is_eval=self.is_eval,
             )
         except Exception as e:
@@ -198,20 +196,20 @@ def get_datas(config: DataFileConfig) -> list[LazyInputData]:
     (
         fn_list,
         (
-            feature_vector_pathmappings,
-            feature_variable_pathmappings,
-            target_vector_pathmappings,
-            target_variable_pathmappings,
-            target_scalar_pathmappings,
+            f0_pathmappings,
+            volume_pathmappings,
+            lab_pathmappings,
+            silence_pathmappings,
+            spec_pathmappings,
         ),
     ) = get_data_paths(
         config.root_dir,
         [
-            config.feature_vector_pathlist_path,
-            config.feature_variable_pathlist_path,
-            config.target_vector_pathlist_path,
-            config.target_variable_pathlist_path,
-            config.target_scalar_pathlist_path,
+            config.f0_pathlist_path,
+            config.volume_pathlist_path,
+            config.lab_pathlist_path,
+            config.silence_pathlist_path,
+            config.spec_pathlist_path,
         ],
     )
 
@@ -226,11 +224,11 @@ def get_datas(config: DataFileConfig) -> list[LazyInputData]:
 
     datas = [
         LazyInputData(
-            feature_vector_path=feature_vector_pathmappings[fn],
-            feature_variable_path=feature_variable_pathmappings[fn],
-            target_vector_path=target_vector_pathmappings[fn],
-            target_variable_path=target_variable_pathmappings[fn],
-            target_scalar_path=target_scalar_pathmappings[fn],
+            f0_path=f0_pathmappings[fn],
+            volume_path=volume_pathmappings[fn],
+            lab_path=lab_pathmappings[fn],
+            silence_path=silence_pathmappings[fn],
+            spec_path=spec_pathmappings[fn],
             speaker_id=speaker_ids[fn],
         )
         for fn in fn_list
