@@ -1,6 +1,7 @@
 """データ処理モジュール"""
 
 from dataclasses import dataclass
+from typing import Literal, assert_never
 
 import numpy
 import torch
@@ -31,8 +32,12 @@ class OutputData:
 
     f0: Tensor  # (L,)
     phoneme: Tensor  # (L,)
-    spec: Tensor  # (L, ?) NOTE: 対数メルスペクトログラム
+    input_spec: Tensor  # (L, ?)
+    target_spec: Tensor  # (L, ?) NOTE: 対数メルスペクトログラム
+    noise_spec: Tensor  # (L, ?)
     speaker_id: Tensor
+    t: Tensor
+    r: Tensor
 
 
 def get_notsilence_range(silence: numpy.ndarray, prepost_silence_length: int):
@@ -127,9 +132,13 @@ def preprocess(
     d: InputData,
     prepost_silence_length: int,
     max_sampling_length: int,
+    flow_type: Literal["rectified_flow", "meanflow"],
+    data_proportion: float,
     is_eval: bool,
 ) -> OutputData:
     """全ての変換・検証・配列化処理を統合"""
+    rng = numpy.random.default_rng()
+
     # リサンプリング
     frame_rate = float(d.spec_data.rate)
     f0 = d.f0_data.resample(
@@ -142,6 +151,9 @@ def preprocess(
         sampling_rate=frame_rate, index=0, kind=ResampleInterpolateKind.nearest
     )
     spec = d.spec_data.array
+
+    if spec.ndim != 2:
+        raise ValueError(f"specの次元数が不正です: ndim={spec.ndim}")
 
     phoneme_id = create_frame_phoneme_ids(d.phonemes, frame_rate=frame_rate)
 
@@ -202,18 +214,65 @@ def preprocess(
         if is_eval:
             offset = 0
         else:
-            offset = numpy.random.default_rng().integers(
-                length - max_sampling_length + 1
-            )
+            offset = rng.integers(length - max_sampling_length + 1)
         s = slice(offset, offset + max_sampling_length)
         f0 = f0[s]
         phoneme_id = phoneme_id[s]
         spec = spec[s]
 
+    match flow_type:
+        case "meanflow":
+            if is_eval:
+                t, r = 1.0, 0.0
+            else:
+                t, r = sample_time_meanflow(data_proportion=data_proportion)
+        case "rectified_flow":
+            if is_eval:
+                t, r = 0.0, 0.0
+            else:
+                t = float(sigmoid(rng.standard_normal()))
+                r = 0.0
+        case _:
+            assert_never(flow_type)
+
+    noise_spec = rng.standard_normal(spec.shape)
+
+    match flow_type:
+        case "meanflow":
+            input_spec = spec + t * (noise_spec - spec)
+        case "rectified_flow":
+            input_spec = noise_spec + t * (spec - noise_spec)
+        case _:
+            assert_never(flow_type)
+
     # Tensor変換
     return OutputData(
         f0=torch.from_numpy(f0).float(),
         phoneme=torch.from_numpy(phoneme_id).long(),
-        spec=torch.from_numpy(spec).float(),
+        input_spec=torch.from_numpy(input_spec.astype(numpy.float32)).float(),
+        target_spec=torch.from_numpy(spec.astype(numpy.float32)).float(),
+        noise_spec=torch.from_numpy(noise_spec.astype(numpy.float32)).float(),
         speaker_id=torch.tensor(d.speaker_id).long(),
+        t=torch.tensor(t, dtype=torch.float32),
+        r=torch.tensor(r, dtype=torch.float32),
     )
+
+
+def sigmoid(a: float | numpy.ndarray) -> float | numpy.ndarray:
+    """シグモイド関数"""
+    return 1 / (1 + numpy.exp(-a))
+
+
+def sample_time_meanflow(data_proportion: float) -> tuple[float, float]:
+    """MeanFlow用の時間サンプリング (t, r)"""
+    rng = numpy.random.default_rng()
+    t_sample = float(sigmoid(rng.standard_normal() * 1.0 + (-0.4)))
+    r_sample = float(sigmoid(rng.standard_normal() * 1.0 + (-0.4)))
+
+    t = max(t_sample, r_sample)
+    r = min(t_sample, r_sample)
+
+    if rng.random() < data_proportion:
+        r = t
+
+    return t, r

@@ -1,6 +1,6 @@
 """機械学習プロジェクトの設定モジュール"""
 
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,6 +36,8 @@ class DatasetConfig(_Model):
     eval_for_test: bool
     eval_times_num: int = 1
     seed: int = 0
+    flow_type: Literal["rectified_flow", "meanflow"]
+    data_proportion: float
 
 
 class NetworkConfig(_Model):

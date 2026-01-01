@@ -98,6 +98,8 @@ class Dataset(BaseDataset[OutputData]):
                 self.datas[i].fetch(),
                 prepost_silence_length=self.config.prepost_silence_length,
                 max_sampling_length=self.config.max_sampling_length,
+                flow_type=self.config.flow_type,
+                data_proportion=self.config.data_proportion,
                 is_eval=self.is_eval,
             )
         except Exception as e:
