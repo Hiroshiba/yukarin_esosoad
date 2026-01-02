@@ -12,6 +12,7 @@ from .sampling_data import (
     ResampleInterpolateKind,
     SamplingData,
 )
+from .statistics import DataStatistics
 
 
 @dataclass
@@ -135,6 +136,7 @@ def preprocess(
     flow_type: Literal["rectified_flow", "meanflow"],
     data_proportion: float,
     is_eval: bool,
+    statistics: DataStatistics,
 ) -> OutputData:
     """全ての変換・検証・配列化処理を統合"""
     rng = numpy.random.default_rng()
@@ -220,6 +222,14 @@ def preprocess(
         phoneme_id = phoneme_id[s]
         spec = spec[s]
 
+    if d.speaker_id < 0 or d.speaker_id >= len(statistics.spec_mean):
+        raise ValueError(f"Invalid speaker_id: {d.speaker_id}")
+
+    speaker_spec_mean = statistics.spec_mean[d.speaker_id]
+    speaker_spec_std = statistics.spec_std[d.speaker_id]
+
+    target_spec = (spec - speaker_spec_mean) / speaker_spec_std
+
     match flow_type:
         case "meanflow":
             if is_eval:
@@ -235,13 +245,13 @@ def preprocess(
         case _:
             assert_never(flow_type)
 
-    noise_spec = rng.standard_normal(spec.shape)
+    noise_spec = rng.standard_normal(target_spec.shape)
 
     match flow_type:
         case "meanflow":
-            input_spec = spec + t * (noise_spec - spec)
+            input_spec = target_spec + t * (noise_spec - target_spec)
         case "rectified_flow":
-            input_spec = noise_spec + t * (spec - noise_spec)
+            input_spec = noise_spec + t * (target_spec - noise_spec)
         case _:
             assert_never(flow_type)
 
@@ -250,7 +260,7 @@ def preprocess(
         f0=torch.from_numpy(f0).float(),
         phoneme=torch.from_numpy(phoneme_id).long(),
         input_spec=torch.from_numpy(input_spec.astype(numpy.float32)).float(),
-        target_spec=torch.from_numpy(spec.astype(numpy.float32)).float(),
+        target_spec=torch.from_numpy(target_spec.astype(numpy.float32)).float(),
         noise_spec=torch.from_numpy(noise_spec.astype(numpy.float32)).float(),
         speaker_id=torch.tensor(d.speaker_id).long(),
         t=torch.tensor(t, dtype=torch.float32),

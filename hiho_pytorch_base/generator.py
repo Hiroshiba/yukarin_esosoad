@@ -9,6 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from .config import Config
+from .data.statistics import DataStatistics
 from .network.predictor import Predictor, create_padding_mask, create_predictor
 
 TensorLike = Tensor | numpy.ndarray
@@ -51,9 +52,27 @@ class Generator(nn.Module):
 
         if isinstance(predictor, Path):
             state_dict = torch.load(predictor, map_location=self.device)
-            predictor = create_predictor(config.network)
+            statistics = DataStatistics(
+                spec_mean=state_dict["spec_mean"].cpu().numpy(),
+                spec_std=state_dict["spec_std"].cpu().numpy(),
+            )
+            predictor = create_predictor(config.network, statistics=statistics)
             predictor.load_state_dict(state_dict)
         self.predictor = predictor.eval().to(self.device)
+
+    def _denorm(
+        self,
+        normalized_spec: Tensor,  # (B, L, C)
+        speaker_id: Tensor,  # (B,)
+    ) -> Tensor:
+        speaker_id = speaker_id.to(self.device).long()
+        spec_mean = self.predictor.spec_mean[speaker_id]  # type: ignore
+        spec_std = self.predictor.spec_std[speaker_id]  # type: ignore
+
+        spec_mean = spec_mean.unsqueeze(1).unsqueeze(2)  # (B, 1, 1)
+        spec_std = spec_std.unsqueeze(1).unsqueeze(2)  # (B, 1, 1)
+
+        return normalized_spec * spec_std + spec_mean
 
     @torch.no_grad()
     def forward(
@@ -74,7 +93,7 @@ class Generator(nn.Module):
         length_t = to_tensor(length, self.device).long()
 
         if self.config.model.flow_type == "rectified_flow":
-            spec = self._generate_rectified_flow(
+            normalized_spec = self._generate_rectified_flow(
                 f0=f0_t,
                 phoneme=phoneme_t,
                 noise_spec=noise_spec_t,
@@ -83,7 +102,7 @@ class Generator(nn.Module):
                 step_num=step_num,
             )
         elif self.config.model.flow_type == "meanflow":
-            spec = self._generate_meanflow(
+            normalized_spec = self._generate_meanflow(
                 f0=f0_t,
                 phoneme=phoneme_t,
                 noise_spec=noise_spec_t,
@@ -94,6 +113,7 @@ class Generator(nn.Module):
         else:
             assert_never(self.config.model.flow_type)
 
+        spec = self._denorm(normalized_spec, speaker_id_t)
         return GeneratorOutput(spec=spec, length=length_t)
 
     def _generate_rectified_flow(

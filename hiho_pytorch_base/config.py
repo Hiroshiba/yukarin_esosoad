@@ -36,6 +36,7 @@ class DatasetConfig(_Model):
     eval_for_test: bool
     eval_times_num: int = 1
     seed: int = 0
+    statistics_cache_dir: UPathField
     flow_type: Literal["rectified_flow", "meanflow"]
     data_proportion: float
 
@@ -52,9 +53,6 @@ class NetworkConfig(_Model):
     speaker_size: int
     speaker_embedding_size: int
     output_size: int
-    postnet_layers: int
-    postnet_kernel_size: int
-    postnet_dropout: float
     flow_type: Literal["rectified_flow", "meanflow"]
 
 

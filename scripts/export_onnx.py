@@ -1,5 +1,7 @@
 """学習済みモデルをONNX形式にエクスポートする"""
 
+# TODO: 変更前なので動作しない
+
 import argparse
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from torch import Tensor, nn
 from upath import UPath
 
 from hiho_pytorch_base.config import Config
+from hiho_pytorch_base.dataset import create_dataset
 from hiho_pytorch_base.network.predictor import Predictor, create_predictor
 
 
@@ -40,7 +43,10 @@ def export_onnx(config_yaml_path: UPath, output_path: Path, verbose: bool) -> No
 
     config = Config.from_dict(yaml.safe_load(config_yaml_path.read_text()))
 
-    predictor = create_predictor(config.network)
+    _datasets, statistics = create_dataset(
+        config.dataset, statistics_workers=config.train.prefetch_workers
+    )
+    predictor = create_predictor(config.network, statistics=statistics)
     wrapper = PredictorWrapper(predictor)
     wrapper.eval()
 

@@ -19,6 +19,7 @@ from .data.data import (
 )
 from .data.phoneme import ArpaPhoneme
 from .data.sampling_data import SamplingData
+from .data.statistics import DataStatistics, StatisticsDataInput, get_or_calc_statistics
 from .utility.upath_utility import to_local_path
 
 
@@ -80,10 +81,12 @@ class Dataset(BaseDataset[OutputData]):
     def __init__(
         self,
         datas: list[LazyInputData],
+        statistics: DataStatistics,
         config: DatasetConfig,
         is_eval: bool,
     ):
         self.datas = datas
+        self.statistics = statistics
         self.config = config
         self.is_eval = is_eval
 
@@ -101,6 +104,7 @@ class Dataset(BaseDataset[OutputData]):
                 flow_type=self.config.flow_type,
                 data_proportion=self.config.data_proportion,
                 is_eval=self.is_eval,
+                statistics=self.statistics,
             )
         except Exception as e:
             raise RuntimeError(
@@ -238,10 +242,22 @@ def get_datas(config: DataFileConfig) -> list[LazyInputData]:
     return datas
 
 
-def create_dataset(config: DatasetConfig) -> DatasetCollection:
+def create_dataset(
+    config: DatasetConfig,
+    *,
+    statistics_workers: int,
+) -> tuple[DatasetCollection, DataStatistics]:
     """データセットを作成"""
     # TODO: accent_estimatorのようにHDF5に対応させ、docs/にドキュメントを書く
     datas = get_datas(config.train)
+    statistics = get_or_calc_statistics(
+        config,
+        [
+            StatisticsDataInput(spec_path=d.spec_path, speaker_id=d.speaker_id)
+            for d in datas
+        ],
+        workers=statistics_workers,
+    )
 
     if config.seed is not None:
         random.Random(config.seed).shuffle(datas)
@@ -253,16 +269,24 @@ def create_dataset(config: DatasetConfig) -> DatasetCollection:
     def _wrapper(datas: list[LazyInputData], is_eval: bool) -> Dataset:
         if is_eval:
             datas = datas * config.eval_times_num
-        dataset = Dataset(datas=datas, config=config, is_eval=is_eval)
+        dataset = Dataset(
+            datas=datas,
+            statistics=statistics,
+            config=config,
+            is_eval=is_eval,
+        )
         return dataset
 
-    return DatasetCollection(
-        train=_wrapper(trains, is_eval=False),
-        test=_wrapper(tests, is_eval=False),
-        eval=(_wrapper(tests, is_eval=True) if config.eval_for_test else None),
-        valid=(
-            _wrapper(get_datas(config.valid), is_eval=True)
-            if config.valid is not None
-            else None
+    return (
+        DatasetCollection(
+            train=_wrapper(trains, is_eval=False),
+            test=_wrapper(tests, is_eval=False),
+            eval=(_wrapper(tests, is_eval=True) if config.eval_for_test else None),
+            valid=(
+                _wrapper(get_datas(config.valid), is_eval=True)
+                if config.valid is not None
+                else None
+            ),
         ),
+        statistics,
     )

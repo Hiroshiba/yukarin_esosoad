@@ -22,6 +22,7 @@ def setup_data_and_config(base_config_path: Path, data_dir: UPath) -> Config:
 
     config.dataset.train.root_dir = data_dir
     config.dataset.valid.root_dir = data_dir
+    config.dataset.statistics_cache_dir = data_dir / "statistics_cache"
 
     root_dir = config.dataset.train.root_dir
     train_num, valid_num = 30, 10
@@ -50,69 +51,94 @@ def setup_data_and_config(base_config_path: Path, data_dir: UPath) -> Config:
         if not valid_pathlist_path.exists():
             valid_pathlist_path.write_text("\n".join(all_relative_paths[train_num:]))
 
-    # 可変長データの長さを事前に決定
-    variable_lengths = {}
-    for stem in all_stems:
-        variable_lengths[stem] = int(np.random.default_rng().integers(1, 30))
+    # 共通の時間長を生成してフレームレートに応じてフレーム数を計算
+    rng = np.random.default_rng(42)
+    durations = {stem: rng.uniform(0.25, 1.0) for stem in all_stems}
+    f0_rate = 200.0
+    spec_rate = 24000 / 256
 
-    # 固定長特徴ベクトル
-    def generate_feature_vector(file_path: Path) -> None:
-        feature_vector = (
-            np.random.default_rng()
-            .normal(size=config.network.feature_vector_size)
-            .astype(np.float32)
-        )
-        np.save(file_path, feature_vector)
-
-    _setup_data(generate_feature_vector, "feature_vector", "npy")
-
-    # 可変長特徴データ
-    def generate_feature_variable(file_path: Path) -> None:
+    # F0データ
+    def generate_f0(file_path: Path) -> None:
         stem = file_path.stem
-        variable_length = variable_lengths[stem]
-        feature_variable = (
-            np.random.default_rng()
-            .normal(size=(variable_length, config.network.feature_variable_size))
-            .astype(np.float32)
-        )
-        np.save(file_path, feature_variable)
-
-    _setup_data(generate_feature_variable, "feature_variable", "npy")
-
-    # サンプリングデータ
-    def generate_target_vector(file_path: Path) -> None:
-        array_length = config.dataset.frame_length
-        array = np.random.default_rng().integers(
-            0, config.network.target_vector_size, size=array_length, dtype=np.int64
-        )
-        sampling_data = SamplingData(array=array, rate=config.dataset.frame_rate)
+        f0_length = int(durations[stem] * f0_rate)
+        f0_data = rng.uniform(80, 300, f0_length).astype(np.float32)
+        unvoiced_mask = rng.random(f0_length) < 0.3
+        f0_data[unvoiced_mask] = 0.0  # NOTE: 無声
+        sampling_data = SamplingData(array=f0_data[:, np.newaxis], rate=f0_rate)
         sampling_data.save(file_path)
 
-    _setup_data(generate_target_vector, "target_vector", "npy")
+    _setup_data(generate_f0, "f0", "npy")
 
-    # 可変長回帰ターゲット
-    def generate_target_variable(file_path: Path) -> None:
+    # ボリュームデータ
+    def generate_volume(file_path: Path) -> None:
         stem = file_path.stem
-        variable_length = variable_lengths[stem]
-        array = (
-            np.random.default_rng()
-            .normal(size=(variable_length, config.network.target_vector_size))
-            .astype(np.float32)
-        )
-        sampling_data = SamplingData(array=array, rate=1.0)
+        volume_length = int(durations[stem] * f0_rate)
+        volume_data = rng.uniform(-60, -20, volume_length).astype(
+            np.float32
+        )  # NOTE: dB
+        sampling_data = SamplingData(array=volume_data[:, np.newaxis], rate=f0_rate)
         sampling_data.save(file_path)
 
-    _setup_data(generate_target_variable, "target_variable", "npy")
+    _setup_data(generate_volume, "volume", "npy")
 
-    # 回帰ターゲット
-    def generate_target_scalar(file_path: Path) -> None:
-        target_class = np.random.default_rng().integers(
-            0, config.network.target_vector_size, dtype=np.int64
+    # LABデータ
+    def generate_lab(file_path: Path) -> None:
+        stem = file_path.stem
+        total_duration = durations[stem]
+
+        # ランダムに音素を選択（母音と子音を混合）
+        vowel_phonemes = ["AA1", "EH0", "IY2", "AE1", "OW0"]
+        consonant_phonemes = ["pau", "B", "T", "NG", "K"]
+        phoneme_names = vowel_phonemes + consonant_phonemes
+
+        num_phonemes = int(rng.integers(3, 8))
+        # 最低1つの母音を保証
+        selected_phonemes = [rng.choice(vowel_phonemes)]
+        remaining_count = num_phonemes - 1
+        if remaining_count > 0:
+            selected_phonemes.extend(rng.choice(phoneme_names, remaining_count))
+        selected_phonemes = np.array(selected_phonemes[:num_phonemes])
+
+        # 音素の継続時間を総時間に比例配分
+        duration_weights = rng.uniform(0.5, 2.0, num_phonemes)
+        duration_weights = duration_weights / np.sum(duration_weights)
+        phoneme_durations = duration_weights * total_duration
+
+        # 音素の時間情報を生成
+        current_time = 0.0
+        lab_lines = []
+        for phoneme, duration in zip(selected_phonemes, phoneme_durations, strict=False):
+            end_time = current_time + duration
+            lab_lines.append(f"{current_time:.4f}\t{end_time:.4f}\t{phoneme}")
+            current_time = end_time
+
+        file_path.write_text("\n".join(lab_lines))
+
+    _setup_data(generate_lab, "lab", "lab")
+
+    # Silenceデータ
+    def generate_silence(file_path: Path) -> None:
+        stem = file_path.stem
+        silence_length = int(durations[stem] * f0_rate)
+        silence_data = rng.random(silence_length) < 0.2
+        sampling_data = SamplingData(
+            array=silence_data[:, np.newaxis], rate=f0_rate
         )
-        target_scalar = float(target_class) + np.random.default_rng().normal() * 0.1
-        np.save(file_path, target_scalar)
+        sampling_data.save(file_path)
 
-    _setup_data(generate_target_scalar, "target_scalar", "npy")
+    _setup_data(generate_silence, "silence", "npy")
+
+    # Specデータ
+    def generate_spec(file_path: Path) -> None:
+        stem = file_path.stem
+        spec_length = int(durations[stem] * spec_rate)
+        spec_data = rng.normal(0, 1, (spec_length, config.network.output_size)).astype(
+            np.float32
+        )
+        sampling_data = SamplingData(array=spec_data, rate=spec_rate)
+        sampling_data.save(file_path)
+
+    _setup_data(generate_spec, "spec", "npy")
 
     # 話者マッピング
     speaker_names = ["A", "B", "C"]

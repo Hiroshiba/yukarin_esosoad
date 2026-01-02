@@ -63,7 +63,10 @@ class VisualizationApp:
     def _create_dataset(self) -> DatasetCollection:
         """データセットを作成"""
         config = Config.from_dict(yaml.safe_load(self.config_path.read_text()))
-        return create_dataset(config.dataset)
+        datasets, _statistics = create_dataset(
+            config.dataset, statistics_workers=config.train.prefetch_workers
+        )
+        return datasets
 
     def _get_output_data(self, index: int, dataset_type: DatasetType) -> OutputData:
         """前処理済みのOutputDataを取得"""

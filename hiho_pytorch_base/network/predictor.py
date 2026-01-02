@@ -4,6 +4,7 @@ import torch
 from torch import Tensor, nn
 
 from ..config import NetworkConfig
+from ..data.statistics import DataStatistics
 from .conformer.encoder import Encoder
 from .transformer.utility import make_non_pad_mask
 
@@ -14,64 +15,6 @@ def create_padding_mask(
     """lengthsからパディングマスクを生成"""
     mask = make_non_pad_mask(lengths).unsqueeze(-2).to(lengths.device)
     return mask
-
-
-class PostNet(nn.Module):
-    """出力後処理用の畳み込みスタック"""
-
-    def __init__(
-        self,
-        channels: int,
-        hidden_channels: int,
-        layers: int,
-        kernel_size: int,
-        dropout: float,
-    ):
-        super().__init__()
-
-        blocks: list[nn.Module] = []
-        for layer in range(layers - 1):
-            in_ch = channels if layer == 0 else hidden_channels
-            out_ch = hidden_channels
-            blocks.append(
-                nn.Sequential(
-                    nn.Conv1d(
-                        in_channels=in_ch,
-                        out_channels=out_ch,
-                        kernel_size=kernel_size,
-                        stride=1,
-                        padding=(kernel_size - 1) // 2,
-                        bias=False,
-                    ),
-                    nn.BatchNorm1d(out_ch),
-                    nn.SiLU(),
-                    nn.Dropout(dropout),
-                )
-            )
-
-        in_ch = hidden_channels if layers != 1 else channels
-        blocks.append(
-            nn.Sequential(
-                nn.Conv1d(
-                    in_channels=in_ch,
-                    out_channels=channels,
-                    kernel_size=kernel_size,
-                    stride=1,
-                    padding=(kernel_size - 1) // 2,
-                    bias=False,
-                ),
-                nn.BatchNorm1d(channels),
-                nn.Dropout(dropout),
-            )
-        )
-
-        self.postnet = nn.Sequential(*blocks)
-
-    def forward(  # noqa: D102
-        self,
-        x: Tensor,  # (B, C, T)
-    ) -> Tensor:
-        return self.postnet(x)
 
 
 class Predictor(nn.Module):
@@ -87,14 +30,19 @@ class Predictor(nn.Module):
         speaker_embedding_size: int,
         output_size: int,
         encoder: Encoder,
-        postnet_layers: int,
-        postnet_kernel_size: int,
-        postnet_dropout: float,
+        statistics: DataStatistics,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
         self.output_size = output_size
+        if len(statistics.spec_mean) != speaker_size:
+            raise ValueError(
+                f"statistics speaker_size mismatch: network={speaker_size} statistics={len(statistics.spec_mean)}"
+            )
+
+        self.register_buffer("spec_mean", torch.from_numpy(statistics.spec_mean))
+        self.register_buffer("spec_std", torch.from_numpy(statistics.spec_std))
 
         self.phoneme_embedder = nn.Sequential(
             nn.Embedding(phoneme_size, phoneme_embedding_size),
@@ -126,13 +74,6 @@ class Predictor(nn.Module):
         self.encoder = encoder
 
         self.post = nn.Linear(hidden_size, output_size)
-        self.postnet = PostNet(
-            channels=output_size,
-            hidden_channels=hidden_size,
-            layers=postnet_layers,
-            kernel_size=postnet_kernel_size,
-            dropout=postnet_dropout,
-        )
 
     def forward(  # noqa: D102
         self,
@@ -165,12 +106,11 @@ class Predictor(nn.Module):
         x = self.pre(x)
 
         x, _ = self.encoder(x=x, cond=None, mask=mask.to(device))
-        y1 = self.post(x)
-        y2 = y1 + self.postnet(y1.transpose(1, 2)).transpose(1, 2)
-        return y2
+        y = self.post(x)
+        return y
 
 
-def create_predictor(config: NetworkConfig) -> Predictor:
+def create_predictor(config: NetworkConfig, *, statistics: DataStatistics) -> Predictor:
     """設定からPredictorを作成"""
     encoder = Encoder(
         hidden_size=config.hidden_size,
@@ -180,8 +120,8 @@ def create_predictor(config: NetworkConfig) -> Predictor:
         positional_dropout_rate=config.conformer_dropout_rate,
         attention_head_size=8,
         attention_dropout_rate=config.conformer_dropout_rate,
-        use_macaron_style=True,
-        use_conv_glu_module=True,
+        use_macaron_style=False,
+        use_conv_glu_module=False,
         conv_glu_module_kernel_size=31,
         feed_forward_hidden_size=config.hidden_size * 4,
         feed_forward_kernel_size=3,
@@ -195,7 +135,5 @@ def create_predictor(config: NetworkConfig) -> Predictor:
         speaker_embedding_size=config.speaker_embedding_size,
         output_size=config.output_size,
         encoder=encoder,
-        postnet_layers=config.postnet_layers,
-        postnet_kernel_size=config.postnet_kernel_size,
-        postnet_dropout=config.postnet_dropout,
+        statistics=statistics,
     )

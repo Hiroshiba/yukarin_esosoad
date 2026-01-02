@@ -1,44 +1,53 @@
 dataset:
   train:
-    feature_vector_pathlist_path: "tests/data/test_data/train_feature_vector_pathlist.txt"
-    feature_variable_pathlist_path: "tests/data/test_data/train_feature_variable_pathlist.txt"
-    target_vector_pathlist_path: "tests/data/test_data/train_target_vector_pathlist.txt"
-    target_variable_pathlist_path: "tests/data/test_data/train_target_variable_pathlist.txt"
-    target_scalar_pathlist_path: "tests/data/test_data/train_target_scalar_pathlist.txt"
+    f0_pathlist_path: "tests/data/test_data/train_f0_pathlist.txt"
+    volume_pathlist_path: "tests/data/test_data/train_volume_pathlist.txt"
+    lab_pathlist_path: "tests/data/test_data/train_lab_pathlist.txt"
+    silence_pathlist_path: "tests/data/test_data/train_silence_pathlist.txt"
+    spec_pathlist_path: "tests/data/test_data/train_spec_pathlist.txt"
     speaker_dict_path: "tests/data/test_data/speaker_dict.json"
     root_dir: "tests/data/test_data"
   valid:
-    feature_vector_pathlist_path: "tests/data/test_data/valid_feature_vector_pathlist.txt"
-    feature_variable_pathlist_path: "tests/data/test_data/valid_feature_variable_pathlist.txt"
-    target_vector_pathlist_path: "tests/data/test_data/valid_target_vector_pathlist.txt"
-    target_variable_pathlist_path: "tests/data/test_data/valid_target_variable_pathlist.txt"
-    target_scalar_pathlist_path: "tests/data/test_data/valid_target_scalar_pathlist.txt"
+    f0_pathlist_path: "tests/data/test_data/valid_f0_pathlist.txt"
+    volume_pathlist_path: "tests/data/test_data/valid_volume_pathlist.txt"
+    lab_pathlist_path: "tests/data/test_data/valid_lab_pathlist.txt"
+    silence_pathlist_path: "tests/data/test_data/valid_silence_pathlist.txt"
+    spec_pathlist_path: "tests/data/test_data/valid_spec_pathlist.txt"
     speaker_dict_path: "tests/data/test_data/speaker_dict.json"
     root_dir: "tests/data/test_data"
+  prepost_silence_length: 5
+  max_sampling_length: 100
   train_num: null
   test_num: 10
   eval_for_test: true
   eval_times_num: 1
   seed: 42
-  frame_rate: 10.0
-  frame_length: 50
+  statistics_cache_dir: "tests/data/test_data"
+  flow_type: "meanflow"
+  data_proportion: 0.75
 
 network:
-  feature_vector_size: 8
-  feature_variable_size: 16
-  hidden_size: 16
-  target_vector_size: 3
-  conformer_block_num: 2
+  phoneme_size: 41
+  phoneme_embedding_size: 24
+  f0_embedding_size: 16
+  hidden_size: 32
+  conformer_block_num: 4
   conformer_dropout_rate: 0.1
   speaker_size: 3
-  speaker_embedding_size: 4
+  speaker_embedding_size: 8
+  output_size: 80
+  flow_type: "meanflow"
 
-model: {}
+model:
+  adaptive_weighting_p: 1.0
+  adaptive_weighting_eps: 0.01
+  flow_type: "meanflow"
 
 train:
   batch_size: 4
   gradient_accumulation: 2
   eval_batch_size: 8
+  diffusion_step_num: 1
   log_epoch: 2
   eval_epoch: 4
   snapshot_epoch: 4

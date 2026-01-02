@@ -62,11 +62,14 @@ def generate(
 
     config = Config.from_dict(yaml.safe_load(config_path.read_text()))
 
+    datasets, _statistics = create_dataset(
+        config.dataset, statistics_workers=config.train.prefetch_workers
+    )
+
     generator = Generator(
         config=config, predictor=to_local_path(predictor_path), use_gpu=use_gpu
     )
-
-    dataset = create_dataset(config.dataset).get(dataset_type)
+    dataset = datasets.get(dataset_type)
     if num_files is not None:
         if num_files > len(dataset):
             raise ValueError(
@@ -85,10 +88,12 @@ def generate(
     for batch in tqdm(data_loader, desc="generate"):
         batch.to_device(device="cuda" if use_gpu else "cpu", non_blocking=True)
         _ = generator(
-            feature_vector=batch.feature_vector,
-            feature_variable=batch.feature_variable,
+            f0=batch.f0,
+            phoneme=batch.phoneme,
+            noise_spec=batch.noise_spec,
             speaker_id=batch.speaker_id,
             length=batch.length,
+            step_num=config.train.diffusion_step_num,
         )
 
 
