@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import assert_never
 
 import numpy
 import torch
 from torch import Tensor, nn
 
 from .config import Config
-from .network.predictor import Predictor, create_predictor
+from .network.predictor import Predictor, create_padding_mask, create_predictor
 
 TensorLike = Tensor | numpy.ndarray
 
@@ -17,9 +18,7 @@ TensorLike = Tensor | numpy.ndarray
 class GeneratorOutput:
     """生成したデータ"""
 
-    vector_output: Tensor  # (B, ?)
-    variable_output: Tensor  # (B, L, ?)
-    scalar_output: Tensor  # (B,)
+    spec: Tensor  # (B, L, ?)
     length: Tensor  # (B,)
 
 
@@ -60,26 +59,129 @@ class Generator(nn.Module):
     def forward(
         self,
         *,
-        feature_vector: TensorLike,  # (B, ?)
-        feature_variable: TensorLike,  # (B, L, ?)
+        f0: TensorLike,  # (B, L)
+        phoneme: TensorLike,  # (B, L)
+        noise_spec: TensorLike,  # (B, L, ?)
         speaker_id: TensorLike,  # (B,)
         length: TensorLike,  # (B,)
+        step_num: int,
     ) -> GeneratorOutput:
         """生成経路で推論する"""
-        (
-            vector_output,  # (B, ?)
-            variable_output,  # (B, L, ?)
-            scalar_output,  # (B,)
-        ) = self.predictor(
-            feature_vector=to_tensor(feature_vector, self.device),
-            feature_variable=to_tensor(feature_variable, self.device),
-            speaker_id=to_tensor(speaker_id, self.device),
-            length=to_tensor(length, self.device),
-        )
+        f0_t = to_tensor(f0, self.device)
+        phoneme_t = to_tensor(phoneme, self.device)
+        noise_spec_t = to_tensor(noise_spec, self.device)
+        speaker_id_t = to_tensor(speaker_id, self.device)
+        length_t = to_tensor(length, self.device).long()
 
-        return GeneratorOutput(
-            vector_output=vector_output,
-            variable_output=variable_output,
-            scalar_output=scalar_output,
-            length=to_tensor(length, self.device),
-        )
+        if self.config.model.flow_type == "rectified_flow":
+            spec = self._generate_rectified_flow(
+                f0=f0_t,
+                phoneme=phoneme_t,
+                noise_spec=noise_spec_t,
+                speaker_id=speaker_id_t,
+                length=length_t,
+                step_num=step_num,
+            )
+        elif self.config.model.flow_type == "meanflow":
+            spec = self._generate_meanflow(
+                f0=f0_t,
+                phoneme=phoneme_t,
+                noise_spec=noise_spec_t,
+                speaker_id=speaker_id_t,
+                length=length_t,
+                step_num=step_num,
+            )
+        else:
+            assert_never(self.config.model.flow_type)
+
+        return GeneratorOutput(spec=spec, length=length_t)
+
+    def _generate_rectified_flow(
+        self,
+        *,
+        f0: Tensor,  # (B, L)
+        phoneme: Tensor,  # (B, L)
+        noise_spec: Tensor,  # (B, L, C)
+        speaker_id: Tensor,  # (B,)
+        length: Tensor,  # (B,)
+        step_num: int,
+    ) -> Tensor:
+        """RectifiedFlowでスペクトログラムを生成"""
+        spec = noise_spec.clone()
+
+        mask = create_padding_mask(length)  # (B, 1, L)
+        mask_3d = mask.squeeze(1).unsqueeze(-1)
+
+        t_array = torch.linspace(0, 1, steps=step_num + 1, device=self.device)[:-1]
+        delta_t_step = 1.0 / step_num
+
+        for i in range(step_num):
+            t = t_array[i].expand(spec.size(0))
+            h = torch.zeros_like(t)
+
+            velocity = self.predictor(
+                f0=f0,
+                phoneme=phoneme,
+                input_spec=spec,
+                mask=mask,
+                t=t,
+                h=h,
+                speaker_id=speaker_id,
+            )
+
+            spec = spec + velocity * delta_t_step * mask_3d
+
+        return spec * mask_3d
+
+    def _generate_meanflow(
+        self,
+        *,
+        f0: Tensor,  # (B, L)
+        phoneme: Tensor,  # (B, L)
+        noise_spec: Tensor,  # (B, L, C)
+        speaker_id: Tensor,  # (B,)
+        length: Tensor,  # (B,)
+        step_num: int,
+    ) -> Tensor:
+        """MeanFlowでスペクトログラムを生成"""
+        mask = create_padding_mask(length)  # (B, 1, L)
+        mask_3d = mask.squeeze(1).unsqueeze(-1)
+
+        if step_num == 1:
+            t = torch.ones(noise_spec.size(0), device=self.device)
+            h = t
+            velocity = self.predictor(
+                f0=f0,
+                phoneme=phoneme,
+                input_spec=noise_spec,
+                mask=mask,
+                t=t,
+                h=h,
+                speaker_id=speaker_id,
+            )
+            return (noise_spec - velocity) * mask_3d
+
+        spec = noise_spec.clone()
+
+        t_array = torch.linspace(1, 0, steps=step_num + 1, device=self.device)
+        delta_t_step = 1.0 / step_num
+
+        for i in range(step_num):
+            t_start = t_array[i]
+            t_end = t_array[i + 1]
+            t = t_start.expand(spec.size(0))
+            h = (t_start - t_end).expand(spec.size(0))
+
+            velocity = self.predictor(
+                f0=f0,
+                phoneme=phoneme,
+                input_spec=spec,
+                mask=mask,
+                t=t,
+                h=h,
+                speaker_id=speaker_id,
+            )
+
+            spec = spec - velocity * delta_t_step * mask_3d
+
+        return spec * mask_3d

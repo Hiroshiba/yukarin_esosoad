@@ -43,20 +43,27 @@ class DatasetConfig(_Model):
 class NetworkConfig(_Model):
     """ニューラルネットワークの設定"""
 
-    feature_vector_size: int
-    feature_variable_size: int
+    phoneme_size: int
+    phoneme_embedding_size: int
+    f0_embedding_size: int
     hidden_size: int
-    target_vector_size: int
     conformer_block_num: int
     conformer_dropout_rate: float
     speaker_size: int
     speaker_embedding_size: int
+    output_size: int
+    postnet_layers: int
+    postnet_kernel_size: int
+    postnet_dropout: float
+    flow_type: Literal["rectified_flow", "meanflow"]
 
 
 class ModelConfig(_Model):
     """モデルの設定"""
 
-    pass
+    adaptive_weighting_p: float
+    adaptive_weighting_eps: float
+    flow_type: Literal["rectified_flow", "meanflow"]
 
 
 class TrainConfig(_Model):
@@ -65,6 +72,7 @@ class TrainConfig(_Model):
     batch_size: int
     gradient_accumulation: int = 1
     eval_batch_size: int
+    diffusion_step_num: int
     log_epoch: int
     eval_epoch: int
     snapshot_epoch: int
@@ -110,6 +118,7 @@ class Config(_Model):
     def validate_config(self) -> None:
         """設定の妥当性を検証"""
         assert self.train.eval_epoch % self.train.log_epoch == 0
+        assert self.dataset.flow_type == self.network.flow_type == self.model.flow_type
 
     def add_git_info(self) -> None:
         """Git情報をプロジェクトタグに追加"""

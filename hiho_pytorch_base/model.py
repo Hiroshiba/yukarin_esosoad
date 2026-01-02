@@ -1,16 +1,14 @@
 """モデルのモジュール。ネットワークの出力から損失を計算する。"""
 
 from dataclasses import dataclass
-from typing import Self
+from typing import Self, assert_never
 
 import torch
 from torch import Tensor, nn
-from torch.nn.functional import cross_entropy, mse_loss
 
 from .batch import BatchOutput
 from .config import ModelConfig
-from .network.predictor import Predictor
-from .network.transformer.utility import make_non_pad_mask
+from .network.predictor import Predictor, create_padding_mask
 from .utility.pytorch_utility import detach_cpu
 from .utility.train_utility import DataNumProtocol
 
@@ -22,42 +20,27 @@ class ModelOutput(DataNumProtocol):
     loss: Tensor
     """逆伝播させる損失"""
 
-    loss_vector: Tensor
-    loss_variable: Tensor
-    loss_scalar: Tensor
-    accuracy: Tensor
+    spec_mse_loss: Tensor
 
     def detach_cpu(self) -> Self:
         """全てのTensorをdetachしてCPUに移動"""
         self.loss = detach_cpu(self.loss)
-        self.loss_vector = detach_cpu(self.loss_vector)
-        self.loss_variable = detach_cpu(self.loss_variable)
-        self.loss_scalar = detach_cpu(self.loss_scalar)
-        self.accuracy = detach_cpu(self.accuracy)
+        self.spec_mse_loss = detach_cpu(self.spec_mse_loss)
         return self
 
 
-def accuracy(
-    output: Tensor,  # (B, ?)
-    target: Tensor,  # (B,)
-) -> Tensor:
-    """分類精度を計算"""
-    with torch.no_grad():
-        indexes = torch.argmax(output, dim=1)  # (B,)
-        correct = torch.eq(indexes, target).view(-1)  # (B,)
-        return correct.float().mean()
-
-
-def masked_mse_loss(
-    output: Tensor,  # (B, L, ?)
-    target: Tensor,  # (B, L, ?)
-    mask: Tensor,  # (B, L)
+def masked_mse_loss(  # noqa: D103
+    output: Tensor,  # (B, L, C)
+    target: Tensor,  # (B, L, C)
+    mask_2d: Tensor,  # (B, L)
 ) -> Tensor:
     """マスク対応のMSE損失を計算"""
-    diff_squared = (output - target) ** 2  # (B, L, ?)
-    mask_expanded = mask.unsqueeze(-1)  # (B, L, 1)
-    masked_loss = diff_squared * mask_expanded  # (B, L, ?)
-    return masked_loss.sum() / (mask.sum() * output.size(-1))
+    diff_squared = (output - target) ** 2
+    masked_loss = diff_squared * mask_2d.unsqueeze(-1)
+    denom = mask_2d.sum() * output.size(-1)
+    if denom.item() <= 0:
+        raise ValueError("mask is empty")
+    return masked_loss.sum() / denom
 
 
 class Model(nn.Module):
@@ -70,34 +53,101 @@ class Model(nn.Module):
 
     def forward(self, batch: BatchOutput) -> ModelOutput:
         """データをネットワークに入力して損失などを計算する"""
-        (
-            vector_output,  # (B, ?)
-            variable_output,  # (B, L, ?)
-            scalar_output,  # (B,)
-        ) = self.predictor(
-            feature_vector=batch.feature_vector,
-            feature_variable=batch.feature_variable,
+        if self.model_config.flow_type == "rectified_flow":
+            return self._forward_rectified_flow(batch)
+        if self.model_config.flow_type == "meanflow":
+            return self._forward_meanflow(batch)
+        assert_never(self.model_config.flow_type)
+
+    def _forward_rectified_flow(self, batch: BatchOutput) -> ModelOutput:
+        """RectifiedFlowの損失を計算"""
+        lengths = batch.length  # (B,)
+        mask = create_padding_mask(lengths)  # (B, 1, L)
+        mask_2d = mask.squeeze(1)  # (B, L)
+
+        h = torch.zeros_like(batch.t)
+        velocity = self.predictor(
+            f0=batch.f0,
+            phoneme=batch.phoneme,
+            input_spec=batch.input_spec,
+            mask=mask,
+            t=batch.t,
+            h=h,
             speaker_id=batch.speaker_id,
-            length=batch.length,
         )
 
-        target_vector = batch.target_vector  # (B,)
-        target_variable = batch.target_variable  # (B, L, ?)
-        target_scalar = batch.target_scalar  # (B,)
+        target_v = batch.target_spec - batch.noise_spec
 
-        mask = make_non_pad_mask(batch.length)  # (B, L)
-
-        loss_vector = cross_entropy(vector_output, target_vector)
-        loss_variable = masked_mse_loss(variable_output, target_variable, mask)
-        loss_scalar = mse_loss(scalar_output, target_scalar)
-        total_loss = loss_vector + loss_variable + loss_scalar
-        acc = accuracy(vector_output, target_vector)
+        loss = masked_mse_loss(velocity, target_v, mask_2d)
 
         return ModelOutput(
-            loss=total_loss,
-            loss_vector=loss_vector,
-            loss_variable=loss_variable,
-            loss_scalar=loss_scalar,
-            accuracy=acc,
+            loss=loss,
+            spec_mse_loss=loss,
+            data_num=batch.data_num,
+        )
+
+    def _forward_meanflow(self, batch: BatchOutput) -> ModelOutput:
+        """MeanFlowの損失を計算"""
+        lengths = batch.length  # (B,)
+        if (lengths <= 0).any():
+            raise ValueError("length must be positive")
+        mask = create_padding_mask(lengths)  # (B, 1, L)
+        mask_2d = mask.squeeze(1)  # (B, L)
+
+        target_v = batch.noise_spec - batch.target_spec  # (B, L, C)
+
+        def u_func(spec: Tensor, t: Tensor, r: Tensor) -> Tensor:
+            """JVP計算用のラッパー関数"""
+            h = t - r
+            output = self.predictor(
+                f0=batch.f0,
+                phoneme=batch.phoneme,
+                input_spec=spec,
+                mask=mask,
+                t=t,
+                h=h,
+                speaker_id=batch.speaker_id,
+            )
+            return output
+
+        u_pred, du_dt = torch.func.jvp(  # type: ignore[attr-defined]
+            func=u_func,
+            primals=(batch.input_spec, batch.t, batch.r),
+            tangents=(
+                target_v,
+                torch.ones_like(batch.t),
+                torch.zeros_like(batch.r),
+            ),
+        )
+
+        batch_size = batch.t.shape[0]
+        max_length = batch.input_spec.size(1)
+        h_expanded = (batch.t - batch.r).unsqueeze(1).expand(batch_size, max_length)
+
+        u_tgt = target_v - h_expanded.unsqueeze(-1) * du_dt
+
+        mse_per_element = (u_pred - u_tgt.detach()) ** 2
+
+        channel = target_v.size(2)
+        masked_mse = mse_per_element * mask_2d.unsqueeze(-1)
+
+        denom_all = mask_2d.sum() * channel
+        if denom_all.item() <= 0:
+            raise ValueError("mask is empty")
+
+        mse = masked_mse.sum() / denom_all
+
+        denom_per_sample = mask_2d.sum(dim=1) * channel
+        loss_per_sample = masked_mse.sum(dim=(1, 2)) / denom_per_sample
+
+        adp_wt = (
+            loss_per_sample.detach() + self.model_config.adaptive_weighting_eps
+        ) ** self.model_config.adaptive_weighting_p
+        loss_per_sample = loss_per_sample / adp_wt
+        loss = loss_per_sample.mean()
+
+        return ModelOutput(
+            loss=loss,
+            spec_mse_loss=mse,
             data_num=batch.data_num,
         )
