@@ -22,8 +22,10 @@ import librosa
 import matplotlib.pyplot as plt
 import numpy as np
 import soundfile as sf
+import torch
 import yaml
 from matplotlib.figure import Figure
+from torch import Tensor
 from upath import UPath
 
 from hiho_pytorch_base.config import Config
@@ -36,6 +38,7 @@ from hiho_pytorch_base.dataset import (
     LazyInputData,
     create_dataset,
 )
+from hiho_pytorch_base.generator import Generator
 from hiho_pytorch_base.utility.upath_utility import to_local_path
 
 
@@ -111,15 +114,60 @@ def extract_audio_segment(audio_path: UPath, start_time: float, end_time: float)
         raise
 
 
+def _resolve_config_path(
+    config_path: UPath | None,
+    predictor_path: UPath | None,
+) -> UPath:
+    """config pathを解決(predictor pathから自動検出)"""
+    if config_path is not None:
+        return config_path
+
+    if predictor_path is None:
+        raise ValueError("config_path または predictor_path が必要です")
+
+    model_dir = predictor_path.parent
+    auto_config_path = model_dir / "config.yaml"
+
+    try:
+        local_config_path = to_local_path(auto_config_path)
+        if not local_config_path.exists():
+            raise FileNotFoundError(
+                f"config.yaml が見つかりません: {auto_config_path}"
+            )
+    except Exception as e:
+        raise FileNotFoundError(
+            f"config.yaml の取得に失敗しました: {auto_config_path}\n元のエラー: {e}"
+        ) from e
+
+    return auto_config_path
+
+
 class VisualizationApp:
     """可視化アプリケーション"""
 
-    def __init__(self, config_path: UPath, initial_dataset_type: DatasetType):
-        self.config_path = config_path
+    def __init__(
+        self,
+        config_path: UPath | None,
+        predictor_path: UPath | None,
+        initial_dataset_type: DatasetType,
+        use_gpu: bool = False,
+    ):
+        self.config_path = _resolve_config_path(config_path, predictor_path)
         self.initial_dataset_type = initial_dataset_type
+        self.use_gpu = use_gpu
 
         self.dataset_collection = self._create_dataset()
         self.figure_state = FigureState()
+
+        self.generator = None
+        self.config = None
+        if predictor_path is not None:
+            try:
+                self.generator, self.config = self._load_generator(predictor_path, use_gpu)
+            except Exception as e:
+                print(f"警告: predictor読み込み失敗: {e}")
+                self.generator = None
+                self.config = None
 
     def _create_dataset(self) -> DatasetCollection:
         """データセットを作成"""
@@ -128,6 +176,51 @@ class VisualizationApp:
             config.dataset, statistics_workers=config.train.prefetch_workers
         )
         return datasets
+
+    def _load_generator(
+        self,
+        predictor_path: UPath,
+        use_gpu: bool,
+    ) -> tuple[Generator, Config]:
+        """Generatorを読み込む"""
+        config = Config.from_dict(
+            yaml.safe_load(to_local_path(self.config_path).read_text())
+        )
+
+        generator = Generator(
+            config=config,
+            predictor=to_local_path(predictor_path),
+            use_gpu=use_gpu,
+        )
+
+        return generator, config
+
+    def _generate_spec(
+        self,
+        output_data: OutputData,
+        step_num: int,
+    ) -> Tensor | None:
+        """スペクトログラムを生成"""
+        if self.generator is None:
+            return None
+
+        try:
+            device = self.generator.device
+
+            result = self.generator(
+                f0=output_data.f0.to(device).unsqueeze(0),
+                phoneme=output_data.phoneme.to(device).unsqueeze(0),
+                noise_spec=output_data.noise_spec.to(device).unsqueeze(0),
+                speaker_id=output_data.speaker_id.to(device).unsqueeze(0),
+                length=torch.tensor([len(output_data.f0)], device=device),
+                step_num=step_num,
+            )
+
+            return result.spec.squeeze(0).cpu()
+
+        except Exception as e:
+            print(f"警告: スペクトログラム生成失敗: {e}")
+            return None
 
     def _get_dataset_and_data(
         self, index: int, dataset_type: DatasetType
@@ -384,8 +477,9 @@ Specデータパス: {lazy_data.spec_path}
         frame_rate: float,
         time_start: float,
         time_end: float,
-    ) -> tuple[Figure, Figure, Figure]:
-        """Diffusion用のスペクトログラムプロットを作成"""
+        step_num: int,
+    ) -> tuple[Figure, Figure, Figure, Figure | None]:
+        """Diffusion用のスペクトログラムプロットを作成(生成含む)"""
         input_spec_array = output_data.input_spec.detach().cpu().numpy()
         target_spec_array = output_data.target_spec.detach().cpu().numpy()
         noise_spec_array = output_data.noise_spec.detach().cpu().numpy()
@@ -414,7 +508,20 @@ Specデータパス: {lazy_data.spec_path}
             time_end=time_end,
         )
 
-        return input_spec_plot, target_spec_plot, noise_spec_plot
+        generated_spec_plot = None
+        if self.generator is not None:
+            generated_spec_tensor = self._generate_spec(output_data, step_num)
+            if generated_spec_tensor is not None:
+                generated_spec_array = generated_spec_tensor.detach().cpu().numpy()
+                generated_spec_plot = self._create_spectrogram_plot(
+                    frame_rate=frame_rate,
+                    spec_data=generated_spec_array,
+                    title="生成スペクトログラム（Generator出力・非正規化済み）",
+                    time_start=time_start,
+                    time_end=time_end,
+                )
+
+        return input_spec_plot, target_spec_plot, noise_spec_plot, generated_spec_plot
 
     def _get_data_info(
         self,
@@ -479,6 +586,11 @@ Specデータパス: {lazy_data.spec_path}
         initial_max_index = len(initial_dataset) - 1
 
         with gr.Blocks() as demo:
+            if self.generator is not None:
+                gr.Markdown(
+                    f"**Predictor読み込み済み**: {self.config.project.name if self.config else 'N/A'}"
+                )
+
             current_index = gr.State(0)
             current_dataset_type = gr.State(self.initial_dataset_type)
 
@@ -498,8 +610,27 @@ Specデータパス: {lazy_data.spec_path}
                     scale=3,
                 )
 
+            if self.generator is not None:
+                default_step_num = (
+                    self.config.train.diffusion_step_num if self.config else 100
+                )
+                step_num_slider = gr.Slider(
+                    minimum=1,
+                    maximum=1000,
+                    value=default_step_num,
+                    step=1,
+                    label="Generation Step Num",
+                )
+            else:
+                step_num_slider = None
+
             current_time_start = gr.State(0.0)
             current_time_end = gr.State(2.0)
+
+            if step_num_slider is None:
+                step_num_input = gr.State(value=0)
+            else:
+                step_num_input = step_num_slider
 
             @gr.render(
                 inputs=[
@@ -507,6 +638,7 @@ Specデータパス: {lazy_data.spec_path}
                     current_dataset_type,
                     current_time_start,
                     current_time_end,
+                    step_num_input,
                 ]
             )
             def render_content(
@@ -514,6 +646,7 @@ Specデータパス: {lazy_data.spec_path}
                 dataset_type: DatasetType,
                 time_start: float,
                 time_end: float,
+                step_num: int,
             ):
                 _, output_data, lazy_data = self._get_dataset_and_data(
                     index, dataset_type
@@ -524,8 +657,13 @@ Specデータパス: {lazy_data.spec_path}
                 main_plot, silence_plot = self._create_plots(
                     index, dataset_type, time_start, time_end
                 )
-                input_spec_plot, target_spec_plot, noise_spec_plot = self._create_diffusion_plots(
-                    output_data, frame_rate, time_start, time_end
+                (
+                    input_spec_plot,
+                    target_spec_plot,
+                    noise_spec_plot,
+                    generated_spec_plot,
+                ) = self._create_diffusion_plots(
+                    output_data, frame_rate, time_start, time_end, step_num
                 )
                 data_info = self._get_data_info(index, dataset_type)
                 diffusion_params = f"Diffusion: t={float(output_data.t.item()):.4f} r={float(output_data.r.item()):.4f}"
@@ -637,6 +775,13 @@ Specデータパス: {lazy_data.spec_path}
                         label="ノイズスペクトログラム",
                     )
 
+                if generated_spec_plot is not None:
+                    with gr.Row():
+                        gr.Plot(
+                            value=generated_spec_plot,
+                            label="生成スペクトログラム（Generator出力・非正規化済み）",
+                        )
+
                 with gr.Row():
                     with gr.Column():
                         gr.Textbox(
@@ -703,9 +848,19 @@ Specデータパス: {lazy_data.spec_path}
         demo.launch(share=False, server_name="0.0.0.0", server_port=7860)
 
 
-def visualize(config_path: UPath, dataset_type: DatasetType) -> None:
+def visualize(
+    config_path: UPath | None,
+    predictor_path: UPath | None,
+    dataset_type: DatasetType,
+    use_gpu: bool = False,
+) -> None:
     """指定されたデータセットをGradio UIで可視化する"""
-    app = VisualizationApp(config_path, dataset_type)
+    app = VisualizationApp(
+        config_path=config_path,
+        predictor_path=predictor_path,
+        initial_dataset_type=dataset_type,
+        use_gpu=use_gpu,
+    )
     app.launch()
 
 
@@ -713,13 +868,34 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="スペクトログラム生成データセットのビジュアライゼーション"
     )
-    parser.add_argument("config_path", type=UPath, help="設定ファイルのパス")
+    parser.add_argument(
+        "--config_path",
+        type=UPath,
+        default=None,
+        help="設定ファイルのパス (省略時は predictor_path から自動検出)",
+    )
+    parser.add_argument(
+        "--predictor_path",
+        type=UPath,
+        default=None,
+        help="予測器モデルのパス (省略時は生成なし)",
+    )
     parser.add_argument(
         "--dataset_type",
         type=DatasetType,
         default=DatasetType.TRAIN,
         help="データセットタイプ",
     )
+    parser.add_argument(
+        "--use_gpu",
+        action="store_true",
+        help="GPU使用",
+    )
 
     args = parser.parse_args()
-    visualize(config_path=args.config_path, dataset_type=args.dataset_type)
+    visualize(
+        config_path=args.config_path,
+        predictor_path=args.predictor_path,
+        dataset_type=args.dataset_type,
+        use_gpu=args.use_gpu,
+    )
