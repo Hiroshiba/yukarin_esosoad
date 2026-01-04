@@ -60,11 +60,12 @@ class Generator(nn.Module):
             predictor.load_state_dict(state_dict)
         self.predictor = predictor.eval().to(self.device)
 
-    def _denorm(
+    def denormalize(
         self,
         normalized_spec: Tensor,  # (B, L, C)
         speaker_id: Tensor,  # (B,)
     ) -> Tensor:
+        """正規化された出力を非正規化する"""
         speaker_id = speaker_id.to(self.device).long()
         spec_mean = self.predictor.spec_mean[speaker_id]  # type: ignore
         spec_std = self.predictor.spec_std[speaker_id]  # type: ignore
@@ -113,7 +114,7 @@ class Generator(nn.Module):
         else:
             assert_never(self.config.model.flow_type)
 
-        spec = self._denorm(normalized_spec, speaker_id_t)
+        spec = self.denormalize(normalized_spec, speaker_id_t)
         return GeneratorOutput(spec=spec, length=length_t)
 
     def _generate_rectified_flow(

@@ -52,7 +52,9 @@ class Evaluator(nn.Module):
 
         mask_2d = create_padding_mask(batch.length).squeeze(1)
         pred_spec_all = output_result.spec[mask_2d]
-        target_spec_all = batch.target_spec[mask_2d]
+        target_spec_all = self.generator.denormalize(
+            batch.target_spec, batch.speaker_id
+        )[mask_2d]
         value = l1_loss(pred_spec_all, target_spec_all)
 
         return EvaluatorOutput(
