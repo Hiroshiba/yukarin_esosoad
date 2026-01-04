@@ -36,6 +36,7 @@ from hiho_pytorch_base.dataset import (
     LazyInputData,
     create_dataset,
 )
+from hiho_pytorch_base.utility.upath_utility import to_local_path
 
 
 @dataclass
@@ -122,7 +123,7 @@ class VisualizationApp:
 
     def _create_dataset(self) -> DatasetCollection:
         """データセットを作成"""
-        config = Config.from_dict(yaml.safe_load(self.config_path.read_text()))
+        config = Config.from_dict(yaml.safe_load(to_local_path(self.config_path).read_text()))
         datasets, _statistics = create_dataset(
             config.dataset, statistics_workers=config.train.prefetch_workers
         )

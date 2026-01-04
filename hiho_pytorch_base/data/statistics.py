@@ -44,12 +44,12 @@ def _get_statistics_cache_key_and_info(
 ) -> tuple[str, dict[str, str | None]]:
     root_dir = None if config.root_dir is None else str(config.root_dir)
 
-    speaker_dict_text = config.speaker_dict_path.read_text()
+    speaker_dict_text = to_local_path(config.speaker_dict_path).read_text()
     speaker_dict_hash = hashlib.sha256(
         speaker_dict_text.encode("utf-8", errors="surrogatepass")
     ).hexdigest()
 
-    spec_pathlist_text = config.spec_pathlist_path.read_text()
+    spec_pathlist_text = to_local_path(config.spec_pathlist_path).read_text()
     spec_pathlist_hash = hashlib.sha256(
         spec_pathlist_text.encode("utf-8", errors="surrogatepass")
     ).hexdigest()
